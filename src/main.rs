@@ -8,6 +8,9 @@ enum Token {
     #[token("let")]
     Let,
 
+    #[token("sprite")]
+    Sprite,
+
     #[token("match")]
     Match,
 
@@ -89,23 +92,27 @@ enum Token {
 
 static CODE: &str = "
 
-// Globals
-let x;
-let y;
+// All sprites
+let counter = 0;
 
-on_flag() {
-    self.x = 67;
-    self.y = \"goodbye world.. :(\";
-    wait(5);
-    broadcast(\"message1\");
-}
+sprite Cat {
+    // This sprite only
+    let x;
+    let y;
 
-on_message(message) {
-    match message {
-        \"message1\" => { self.x -= 61; self.y = \"oh hello again!\"; },
+    on_flag() {
+        self.x = 67;
+        self.y = \"goodbye world.. :(\";
+        wait(5);
+        broadcast(\"message1\");
+    }
+
+    on_message(message) {
+        match message {
+            \"message1\" => { self.x -= 61; self.y = \"oh hello again!\"; counter += 1;},
+        }
     }
 }
-
 ";
 
 fn main() {
