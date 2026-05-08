@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::parser::{Comparison, Expression, Operation, Statement};
+use crate::parser::{BlockParamType, Comparison, Expression, Operation, Statement};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +82,7 @@ pub struct Input(
 pub enum Field {
     Value(String),
     ValueWithId(String, String),
+    ValueWithNull(String),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -110,6 +111,13 @@ pub struct Block {
     pub mutation: Option<Mutation>,
 }
 
+#[derive(Clone)]
+pub struct CustomBlockDef {
+    pub def_id: String,
+    pub prototype_id: String,
+    pub params: Vec<(String, String, BlockParamType)>, // (arg_id, name, type)
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Mutation {
@@ -119,15 +127,15 @@ pub struct Mutation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proccode: Option<String>, // "my block %s %b"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub argumentids: Option<Vec<String>>,
+    pub argumentids: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warp: Option<bool>,
 
     // procedures_prototype only
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub argumentnames: Option<Vec<String>>,
+    pub argumentnames: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub argumentdefaults: Option<Vec<Value>>,
+    pub argumentdefaults: Option<String>,
 
     // control_stop only
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,6 +236,7 @@ fn broadcast_input(name: &str, id: &str) -> Input {
 fn expr_to_input(
     expr: &Expression,
     var_ids: &HashMap<String, String>,
+    param_ids: &HashMap<String, (String, BlockParamType)>,
     blocks: &mut HashMap<String, Block>,
     parent_id: &str,
 ) -> Input {
@@ -235,8 +244,23 @@ fn expr_to_input(
         Expression::Number(n) => number_input(*n),
         Expression::StringLit(s) => string_input(s),
         Expression::Ident(name) => {
-            let id = var_ids.get(name).cloned().unwrap_or_else(uid);
-            variable_input(name, &id)
+            if let Some((_, param_type)) = param_ids.get(name) {
+                let reporter_id = uid();
+                let opcode = match param_type {
+                    BlockParamType::Any => "argument_reporter_string_number",
+                    BlockParamType::Bool => "argument_reporter_boolean",
+                };
+                let mut reporter = Block::new(opcode, Some(parent_id.to_string())).with_field(
+                    "VALUE",
+                    Field::ValueWithId(name.clone(), "null".to_string()),
+                );
+                reporter.shadow = true;
+                blocks.insert(reporter_id.clone(), reporter);
+                Input(3, InputValue::BlockId(reporter_id), None)
+            } else {
+                let id = var_ids.get(name).cloned().unwrap_or_else(uid);
+                variable_input(name, &id)
+            }
         }
         Expression::SelfField(name) => {
             let id = var_ids.get(name).cloned().unwrap_or_else(uid);
@@ -252,8 +276,8 @@ fn expr_to_input(
             };
 
             let op_id = uid();
-            let left_input = expr_to_input(left, var_ids, blocks, &op_id);
-            let right_input = expr_to_input(right, var_ids, blocks, &op_id);
+            let left_input = expr_to_input(left, var_ids, param_ids, blocks, &op_id);
+            let right_input = expr_to_input(right, var_ids, param_ids, blocks, &op_id);
 
             let op_block = Block::new(opcode, Some(parent_id.to_string()))
                 .with_input("NUM1", left_input)
@@ -291,8 +315,8 @@ fn expr_to_input(
                 )
             }
 
-            let left_input = expr_to_input(left, var_ids, blocks, &op_id);
-            let right_input = expr_to_input(right, var_ids, blocks, &op_id);
+            let left_input = expr_to_input(left, var_ids, param_ids, blocks, &op_id);
+            let right_input = expr_to_input(right, var_ids, param_ids, blocks, &op_id);
 
             let op_block = Block::new(opcode, Some(parent_id.to_string()))
                 .with_input("OPERAND1", left_input)
@@ -309,6 +333,8 @@ fn emit_stmts(
     stmts: &[Statement],
     blocks: &mut HashMap<String, Block>,
     var_ids: &HashMap<String, String>,
+    param_ids: &HashMap<String, (String, BlockParamType)>,
+    custom_blocks: &mut HashMap<String, CustomBlockDef>,
     broadcast_ids: &HashMap<String, String>,
     parent_id: Option<String>,
 ) -> Option<String> {
@@ -323,8 +349,16 @@ fn emit_stmts(
 
         let block = match stmt {
             Statement::If { condition, body } => {
-                let condition_input = expr_to_input(condition, var_ids, blocks, &id);
-                let body_first = emit_stmts(body, blocks, var_ids, broadcast_ids, Some(id.clone()));
+                let condition_input = expr_to_input(condition, var_ids, param_ids, blocks, &id);
+                let body_first = emit_stmts(
+                    body,
+                    blocks,
+                    var_ids,
+                    param_ids,
+                    custom_blocks,
+                    broadcast_ids,
+                    Some(id.clone()),
+                );
                 let mut block = Block::new("control_if", prev_id.clone())
                     .with_input("CONDITION", condition_input);
                 if let Some(first) = body_first {
@@ -338,10 +372,25 @@ fn emit_stmts(
                 body,
                 else_body,
             } => {
-                let condition_input = expr_to_input(condition, var_ids, blocks, &id);
-                let body_first = emit_stmts(body, blocks, var_ids, broadcast_ids, Some(id.clone()));
-                let else_body_first =
-                    emit_stmts(else_body, blocks, var_ids, broadcast_ids, Some(id.clone()));
+                let condition_input = expr_to_input(condition, var_ids, param_ids, blocks, &id);
+                let body_first = emit_stmts(
+                    body,
+                    blocks,
+                    var_ids,
+                    param_ids,
+                    custom_blocks,
+                    broadcast_ids,
+                    Some(id.clone()),
+                );
+                let else_body_first = emit_stmts(
+                    else_body,
+                    blocks,
+                    var_ids,
+                    param_ids,
+                    custom_blocks,
+                    broadcast_ids,
+                    Some(id.clone()),
+                );
                 let mut block = Block::new("control_if_else", prev_id.clone())
                     .with_input("CONDITION", condition_input);
                 if let Some(first) = body_first {
@@ -363,6 +412,47 @@ fn emit_stmts(
                     .with_input("BROADCAST_INPUT", broadcast_input(message, &msg_id))
             }
 
+            Statement::BlockCall { name, args } => {
+                let def = custom_blocks.get(name).expect("unknown block");
+                let mut block = Block::new("procedures_call", prev_id.clone());
+
+                let arg_ids: Vec<String> = def.params.iter().map(|(id, _, _)| id.clone()).collect();
+                let proccode = if def.params.is_empty() {
+                    name.clone()
+                } else {
+                    format!(
+                        "{} {}",
+                        name,
+                        def.params
+                            .iter()
+                            .map(|(_, _, t)| match t {
+                                BlockParamType::Any => "%s",
+                                BlockParamType::Bool => "%b",
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                };
+
+                for ((arg_id, _, _), arg_expr) in def.params.iter().zip(args.iter()) {
+                    let input = expr_to_input(arg_expr, var_ids, param_ids, blocks, &id);
+                    block = block.with_input(arg_id, input);
+                }
+
+                block.mutation = Some(Mutation {
+                    tag_name: "mutation".to_string(),
+                    children: vec![],
+                    proccode: Some(proccode),
+                    argumentids: Some(serde_json::to_string(&arg_ids).unwrap()),
+                    warp: Some(false),
+                    argumentnames: None,
+                    argumentdefaults: None,
+                    hasnext: None,
+                });
+
+                block
+            }
+
             Statement::AssignVar {
                 name,
                 operation,
@@ -378,7 +468,7 @@ fn emit_stmts(
                         Expression::Number(n) => number_input(-n),
                         _ => {
                             let neg_id = uid();
-                            let inner = expr_to_input(value, var_ids, blocks, &neg_id);
+                            let inner = expr_to_input(value, var_ids, param_ids, blocks, &neg_id);
                             let neg_block = Block::new("operator_subtract", Some(id.clone()))
                                 .with_input("NUM1", number_input(0.0))
                                 .with_input("NUM2", inner);
@@ -387,7 +477,7 @@ fn emit_stmts(
                         }
                     }
                 } else {
-                    expr_to_input(value, var_ids, blocks, &id)
+                    expr_to_input(value, var_ids, param_ids, blocks, &id)
                 };
                 Block::new(opcode, prev_id.clone())
                     .with_input("VALUE", input_value)
@@ -409,7 +499,7 @@ fn emit_stmts(
                         Expression::Number(n) => number_input(-n),
                         _ => {
                             let neg_id = uid();
-                            let inner = expr_to_input(value, var_ids, blocks, &neg_id);
+                            let inner = expr_to_input(value, var_ids, param_ids, blocks, &neg_id);
                             let neg_block = Block::new("operator_subtract", Some(id.clone()))
                                 .with_input("NUM1", number_input(0.0))
                                 .with_input("NUM2", inner);
@@ -418,7 +508,7 @@ fn emit_stmts(
                         }
                     }
                 } else {
-                    expr_to_input(value, var_ids, blocks, &id)
+                    expr_to_input(value, var_ids, param_ids, blocks, &id)
                 };
                 Block::new(opcode, prev_id.clone())
                     .with_input("VALUE", input_value)
@@ -428,7 +518,8 @@ fn emit_stmts(
             Statement::VarDecl { .. }
             | Statement::Sprite { .. }
             | Statement::OnFlag { .. }
-            | Statement::OnMessage { .. } => continue,
+            | Statement::OnMessage { .. }
+            | Statement::BlockDef { .. } => continue,
         };
 
         // Patch previous block's next pointer
@@ -447,6 +538,7 @@ fn emit_stmts(
 
 pub fn compile(stmts: &[Statement]) -> Value {
     let mut global_var_names: Vec<String> = vec![];
+    let mut global_blocks: HashMap<String, CustomBlockDef> = HashMap::new();
     let mut broadcast_names: Vec<String> = vec![];
     let mut sprites: Vec<(&str, &[Statement])> = vec![];
 
@@ -455,6 +547,19 @@ pub fn compile(stmts: &[Statement]) -> Value {
             Statement::VarDecl { name } => global_var_names.push(name.clone()),
             Statement::Broadcast { message } => broadcast_names.push(message.clone()),
             Statement::Sprite { name, body } => sprites.push((name, body)),
+            Statement::BlockDef { name, params, .. } => {
+                global_blocks.insert(
+                    name.clone(),
+                    CustomBlockDef {
+                        def_id: uid(),
+                        prototype_id: uid(),
+                        params: params
+                            .iter()
+                            .map(|p| (uid(), p.name.clone(), p.param_type))
+                            .collect(),
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -508,9 +613,28 @@ pub fn compile(stmts: &[Statement]) -> Value {
 
     for (layer, (sprite_name, body)) in sprites.iter().enumerate() {
         let mut var_ids = global_var_ids.clone();
+        let mut sprite_blocks: HashMap<String, CustomBlockDef> = global_blocks.clone();
         for stmt in *body {
-            if let Statement::VarDecl { name } = stmt {
-                var_ids.insert(name.clone(), uid());
+            match stmt {
+                Statement::VarDecl { name } => {
+                    var_ids.insert(name.clone(), uid());
+                }
+                Statement::BlockDef { name, params, .. } => {
+                    if !sprite_blocks.contains_key(name) {
+                        sprite_blocks.insert(
+                            name.clone(),
+                            CustomBlockDef {
+                                def_id: uid(),
+                                prototype_id: uid(),
+                                params: params
+                                    .iter()
+                                    .map(|p| (uid(), p.name.clone(), p.param_type))
+                                    .collect(),
+                            },
+                        );
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -530,6 +654,8 @@ pub fn compile(stmts: &[Statement]) -> Value {
                         body,
                         &mut blocks,
                         &var_ids,
+                        &HashMap::new(),
+                        &mut sprite_blocks,
                         &broadcast_ids,
                         Some(hat_id.clone()),
                     );
@@ -545,6 +671,8 @@ pub fn compile(stmts: &[Statement]) -> Value {
                         body,
                         &mut blocks,
                         &var_ids,
+                        &HashMap::new(),
+                        &mut sprite_blocks,
                         &broadcast_ids,
                         Some(hat_id.clone()),
                     );
@@ -554,6 +682,84 @@ pub fn compile(stmts: &[Statement]) -> Value {
                     hat.fields.insert(
                         "BROADCAST_OPTION".to_string(),
                         Field::ValueWithId(message.clone(), msg_id),
+                    );
+                    blocks.insert(hat_id, hat);
+                }
+
+                Statement::BlockDef {
+                    name,
+                    params: _,
+                    body,
+                } => {
+                    let def = sprite_blocks.get(name).expect("unknown block");
+                    let hat_id = def.def_id.clone();
+                    let proto_id = def.prototype_id.clone();
+
+                    let param_ids: HashMap<String, (String, BlockParamType)> = def
+                        .params
+                        .iter()
+                        .map(|(arg_id, name, t)| (name.clone(), (arg_id.clone(), *t)))
+                        .collect();
+                    let arg_ids: Vec<String> =
+                        def.params.iter().map(|(id, _, _)| id.clone()).collect();
+                    let arg_names: Vec<String> =
+                        def.params.iter().map(|(_, name, _)| name.clone()).collect();
+                    let proccode = if def.params.is_empty() {
+                        name.clone()
+                    } else {
+                        format!(
+                            "{} {}",
+                            name,
+                            def.params
+                                .iter()
+                                .map(|(_, _, t)| match t {
+                                    BlockParamType::Any => "%s",
+                                    BlockParamType::Bool => "%b",
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    };
+
+                    // emit a reporter block for each param
+                    let mut proto_block = Block::new("procedures_prototype", Some(hat_id.clone()));
+                    proto_block.shadow = true;
+
+                    let arg_defaults = def
+                        .params
+                        .iter()
+                        .map(|(_, _, t)| match t {
+                            BlockParamType::Any => json!(""),
+                            BlockParamType::Bool => json!(false),
+                        })
+                        .collect::<Vec<_>>();
+                    proto_block.mutation = Some(Mutation {
+                        tag_name: "mutation".to_string(),
+                        children: vec![],
+                        proccode: Some(proccode),
+                        argumentids: Some(serde_json::to_string(&arg_ids).unwrap()),
+                        warp: Some(false),
+                        argumentnames: Some(serde_json::to_string(&arg_names).unwrap()),
+                        argumentdefaults: Some(serde_json::to_string(&arg_defaults).unwrap()),
+                        hasnext: None,
+                    });
+                    blocks.insert(proto_id.clone(), proto_block);
+
+                    let body_first = emit_stmts(
+                        body,
+                        &mut blocks,
+                        &var_ids,
+                        &param_ids,
+                        &mut sprite_blocks,
+                        &mut broadcast_ids,
+                        Some(hat_id.clone()),
+                    );
+                    let mut hat =
+                        Block::hat("procedures_definition", 600.0, (layer as f64) * 300.0);
+                    hat.next = body_first;
+                    hat.inputs.insert(
+                        "custom_block".to_string(),
+                        Input(2, InputValue::BlockId(proto_id), None),
                     );
                     blocks.insert(hat_id, hat);
                 }

@@ -36,6 +36,18 @@ pub enum Comparison {
     Or,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum BlockParamType {
+    Any,
+    Bool,
+}
+
+#[derive(Debug)]
+pub struct BlockParam {
+    pub name: String,
+    pub param_type: BlockParamType,
+}
+
 #[derive(Debug)]
 pub enum Statement {
     If {
@@ -63,6 +75,15 @@ pub enum Statement {
     Sprite {
         name: String,
         body: Vec<Statement>,
+    },
+    BlockDef {
+        name: String,
+        params: Vec<BlockParam>,
+        body: Vec<Statement>,
+    },
+    BlockCall {
+        name: String,
+        args: Vec<Expression>,
     },
     OnFlag {
         body: Vec<Statement>,
@@ -273,7 +294,7 @@ impl Parser {
         }
     }
 
-    fn parse_block(&mut self) -> Vec<Statement> {
+    fn parse_body(&mut self) -> Vec<Statement> {
         self.expect(&Token::OpenBrace);
         let mut stmts = vec![];
         while !matches!(self.peek(), Some(Token::CloseBrace) | None) {
@@ -318,30 +339,48 @@ impl Parser {
         })
     }
 
-    fn parse_self_assign(&mut self) -> Option<Statement> {
-        self.next();
+    fn parse_self_stmt(&mut self) -> Option<Statement> {
+        self.next(); // consume `self`
         self.expect(&Token::Dot);
-        let field = match self.next() {
-            Some(Token::Ident(f)) => f,
-            other => panic!("expected field name after self., got {:?}", other),
+        let name = match self.next() {
+            Some(Token::Ident(s)) => s,
+            other => panic!("expected ident after self., got {:?}", other),
         };
-        let operation = match self.next() {
-            Some(Token::Assign) => Operation::Assign,
-            Some(Token::AssAdd) => Operation::Add,
-            Some(Token::AssSubtract) => Operation::Subtract,
-            Some(Token::AssMultiply) => Operation::Multiply,
-            Some(Token::AssDivide) => Operation::Divide,
-            other => panic!("expected operation after self., got {:?}", other),
-        };
-        let value = self
-            .parse_expression()
-            .expect("expected expression after =");
-        self.expect(&Token::SemiColon);
-        Some(Statement::SelfAssign {
-            field,
-            operation,
-            value,
-        })
+
+        match self.peek().cloned() {
+            Some(Token::LParen) => {
+                // it's a block call
+                self.next(); // consume `(`
+                let mut args = vec![];
+                while !matches!(self.peek(), Some(Token::RParen) | None) {
+                    args.push(self.parse_expression().expect("expected argument"));
+                    if matches!(self.peek(), Some(Token::Comma)) {
+                        self.next();
+                    }
+                }
+                self.expect(&Token::RParen);
+                self.expect(&Token::SemiColon);
+                Some(Statement::BlockCall { name, args })
+            }
+            _ => {
+                // it's an assignment
+                let operation = match self.next() {
+                    Some(Token::Assign) => Operation::Assign,
+                    Some(Token::AssAdd) => Operation::Add,
+                    Some(Token::AssSubtract) => Operation::Subtract,
+                    Some(Token::AssMultiply) => Operation::Multiply,
+                    Some(Token::AssDivide) => Operation::Divide,
+                    other => panic!("expected operation, got {:?}", other),
+                };
+                let value = self.parse_expression().expect("expected expression");
+                self.expect(&Token::SemiColon);
+                Some(Statement::SelfAssign {
+                    field: name,
+                    operation,
+                    value,
+                })
+            }
+        }
     }
 
     fn parse_sprite(&mut self) -> Option<Statement> {
@@ -350,7 +389,7 @@ impl Parser {
             Some(Token::Ident(s)) => s,
             other => panic!("expected sprite name, got {:?}", other),
         };
-        let body = self.parse_block();
+        let body = self.parse_body();
         Some(Statement::Sprite { name, body })
     }
 
@@ -358,7 +397,7 @@ impl Parser {
         self.next();
         self.expect(&Token::LParen);
         self.expect(&Token::RParen);
-        let body = self.parse_block();
+        let body = self.parse_body();
         Some(Statement::OnFlag { body })
     }
 
@@ -386,6 +425,69 @@ impl Parser {
         Some(Statement::Broadcast { message })
     }
 
+    fn parse_event(&mut self) -> Option<Statement> {
+        self.next();
+        match self.peek() {
+            Some(Token::Ident(s)) => match s.as_str() {
+                "on_flag" => self.parse_on_flag(),
+                "on_message" => self.parse_on_message(),
+                _ => panic!("unknown event name: {}", s),
+            },
+            other => panic!("expected event name, got {:?}", other),
+        }
+    }
+
+    fn parse_params(&mut self) -> Vec<BlockParam> {
+        let mut params = Vec::new();
+
+        // empty params
+        if matches!(self.peek(), Some(Token::RParen)) {
+            return params;
+        }
+
+        loop {
+            let name = match self.next() {
+                Some(Token::Ident(s)) => s,
+                other => panic!("expected param name, got {:?}", other),
+            };
+
+            let param_type = if matches!(self.peek(), Some(Token::Colon)) {
+                self.next(); // consume `:`
+                match self.next() {
+                    Some(Token::Bool) => BlockParamType::Bool,
+                    Some(Token::Any) => BlockParamType::Any,
+                    other => panic!("expected param type, got {:?}", other),
+                }
+            } else {
+                BlockParamType::Any // default if no annotation
+            };
+
+            params.push(BlockParam { name, param_type });
+
+            match self.peek().cloned() {
+                Some(Token::Comma) => {
+                    self.next();
+                }
+                _ => break,
+            }
+        }
+
+        params
+    }
+
+    fn parse_block(&mut self) -> Option<Statement> {
+        self.next(); // consume `block`
+        let name = match self.next() {
+            Some(Token::Ident(s)) => s,
+            other => panic!("expected block name, got {:?}", other),
+        };
+        self.expect(&Token::LParen);
+        let params = self.parse_params();
+        self.expect(&Token::RParen);
+        let body = self.parse_body();
+        Some(Statement::BlockDef { name, params, body })
+    }
+
     fn parse_on_message(&mut self) -> Option<Statement> {
         self.next();
         self.expect(&Token::LParen);
@@ -394,7 +496,7 @@ impl Parser {
             other => panic!("expected message string, got {:?}", other),
         };
         self.expect(&Token::RParen);
-        let body = self.parse_block();
+        let body = self.parse_body();
         Some(Statement::OnMessage { message, body })
     }
 
@@ -403,11 +505,11 @@ impl Parser {
         self.expect(&Token::LParen);
         let condition = self.parse_expression().unwrap();
         self.expect(&Token::RParen);
-        let body = self.parse_block();
+        let body = self.parse_body();
         match self.peek() {
             Some(Token::Else) => {
                 self.next();
-                let else_body = self.parse_block();
+                let else_body = self.parse_body();
                 Some(Statement::IfElse {
                     condition,
                     body,
@@ -423,11 +525,11 @@ impl Parser {
             Some(Token::Let) => self.parse_let_statement(),
             Some(Token::If) => self.parse_if_statement(),
             Some(Token::Sprite) => self.parse_sprite(),
-            Some(Token::OnFlag) => self.parse_on_flag(),
-            Some(Token::OnMessage) => self.parse_on_message(),
+            Some(Token::Event) => self.parse_event(),
+            Some(Token::Block) => self.parse_block(),
             Some(Token::Wait) => self.parse_wait(),
             Some(Token::Broadcast) => self.parse_broadcast(),
-            Some(Token::SelfKw) => self.parse_self_assign(),
+            Some(Token::SelfKw) => self.parse_self_stmt(),
             Some(Token::Ident(_)) => {
                 let name = match self.next() {
                     Some(Token::Ident(n)) => n,

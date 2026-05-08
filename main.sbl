@@ -1,0 +1,54 @@
+let counter;
+
+sprite Cat {
+    let x;
+    let y;
+
+    block set_vars(x: any, y: any, be_the_one: bool) {
+        if (be_the_one) {
+            counter += 1;
+        }
+        self.x = x;
+        self.y = y;
+    }
+
+    event on_flag() {
+        self.x = 67;
+        self.y = "goodbye world.. :(";
+        wait(5);
+        broadcast("message1");
+    }
+
+    event on_message("message1") {
+        self.set_vars(61, "oh hello again!", (x == 67));
+        counter += 1;
+        if (self.x < 67 * (-2 + 5) && self.y == "oh hello again!") {
+            counter += 5;
+        } else {
+            counter -= 3;
+        }
+    }
+}
+
+sprite Dog {
+    let x;
+    let y;
+
+    event on_flag() {
+        self.x = 12;
+        self.y = "hello world!";
+        wait(5);
+        broadcast("message2");
+    }
+
+    event on_message("message2") {
+        self.x -= 6;
+        self.y = "oh bye :(";
+        counter += 1;
+        if (self.x < 12 * (-24 + -56) && self.y == "oh bye :(") {
+            counter += 5;
+        } else {
+            counter -= 3;
+        }
+    }
+}

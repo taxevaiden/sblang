@@ -23,8 +23,14 @@ pub fn write_sb3(project_json: &str, output_path: &str) {
     zip.finish().expect("failed to finish zip");
 }
 
+pub fn write_json(project_json: &str, output_path: &str) {
+    let mut file = fs::File::create(output_path).expect("failed to create .json file");
+    file.write_all(project_json.as_bytes())
+        .expect("failed to write project.json contents");
+}
+
 #[derive(Logos, Clone, Debug, PartialEq)]
-#[logos(skip r"[ \t\n\f]+")]
+#[logos(skip r"[ \t\n\r\f]+")]
 #[logos(skip(r"//[^\r\n]*", allow_greedy = true))]
 pub enum Token {
     // Keywords
@@ -43,12 +49,11 @@ pub enum Token {
     #[token("self")]
     SelfKw,
 
-    // Events
-    #[token("on_flag")]
-    OnFlag,
+    #[token("event")]
+    Event,
 
-    #[token("on_message")]
-    OnMessage,
+    #[token("block")]
+    Block,
 
     // Built-in functions
     #[token("broadcast")]
@@ -121,12 +126,21 @@ pub enum Token {
     })]
     StringLit(String),
 
+    #[token("any")]
+    Any,
+
+    #[token("bool")]
+    Bool,
+
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
 
     // Delimiters
     #[token(";")]
     SemiColon,
+
+    #[token(":")]
+    Colon,
 
     #[token("{")]
     OpenBrace,
@@ -151,42 +165,25 @@ sprite Cat {
     let x;
     let y;
 
-    on_flag() {
+    block set_vars(x: any, y: any, be_the_one: bool) {
+        if (be_the_one) {
+            counter += 1;
+        }
+        self.x = x;
+        self.y = y;
+    }
+
+    event on_flag() {
         self.x = 67;
         self.y = \"goodbye world.. :(\";
         wait(5);
         broadcast(\"message1\");
     }
 
-    on_message(\"message1\") {
-        self.x -= 61;
-        self.y = \"oh hello again!\";
+    event on_message(\"message1\") {
+        self.set_vars(61, \"oh hello again!\", (x == 67));
         counter += 1;
         if (self.x < 67 * (-2 + 5) && self.y == \"oh hello again!\") {
-            counter += 5;
-        } else {
-            counter -= 3;
-        }
-    }
-}
-
-sprite Dog {
-    // This sprite only
-    let x;
-    let y;
-
-    on_flag() {
-        self.x = 12;
-        self.y = \"hello world!\";
-        wait(5);
-        broadcast(\"message2\");
-    }
-
-    on_message(\"message2\") {
-        self.x -= 6;
-        self.y = \"oh bye :(\";
-        counter += 1;
-        if (self.x < 12 * (-24 + -56) && self.y == \"oh bye :(\") {
             counter += 5;
         } else {
             counter -= 3;
@@ -197,7 +194,16 @@ sprite Dog {
 ";
 
 fn main() {
-    let lexer = Token::lexer(CODE);
+    let args: Vec<String> = std::env::args().collect();
+
+    let code = if args.len() > 1 {
+        let input = &args[1];
+        std::fs::read_to_string(input).unwrap()
+    } else {
+        CODE.to_string()
+    };
+
+    let lexer = Token::lexer(&code);
     let mut tokens: Vec<Token> = vec![];
 
     println!(" \n\nTokens:");
@@ -220,6 +226,7 @@ fn main() {
 
     let project = compiler::compile(stmts.as_slice());
     let json = serde_json::to_string_pretty(&project).unwrap();
+    write_json(&json, "project.json");
     write_sb3(&json, "project.sb3");
-    println!("wrote project.sb3");
+    println!("wrote project.json and project.sb3");
 }
