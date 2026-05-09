@@ -20,7 +20,7 @@ sprite Cat {
     }
 
     event on_message("message1") {
-        self.set_vars(61, "oh hello again!", (x == 67));
+        self.set_vars(61, "oh hello again!", x == 67);
         counter += 1;
         if (self.x < 67 * (-2 + 5) && self.y == "oh hello again!") {
             counter += 5;

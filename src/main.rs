@@ -203,27 +203,25 @@ fn main() {
         CODE.to_string()
     };
 
+    println!("\n\ntokenizing...");
+
     let lexer = Token::lexer(&code);
     let mut tokens: Vec<Token> = vec![];
 
-    println!(" \n\nTokens:");
     for result in lexer {
         match result {
             Ok(token) => {
-                println!("{:?}", token);
                 tokens.push(token);
             }
             Err(err) => panic!("unknown token: {:?}", err),
         }
     }
 
-    println!(" \n\nStatements:");
+    println!("parsing...");
     let mut parser = Parser::new(tokens);
     let stmts = parser.parse();
-    for stmt in &stmts {
-        println!("{:?}", stmt);
-    }
 
+    println!("compiling...");
     let project = compiler::compile(stmts.as_slice());
     let json = serde_json::to_string_pretty(&project).unwrap();
     write_json(&json, "project.json");
